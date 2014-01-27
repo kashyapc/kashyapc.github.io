@@ -1,0 +1,105 @@
+<h1 id="kvm-based-nested-virtualization-setup-w-virt-builder">KVM-based nested virtualization setup w/ virt-builder</h1>
+<h2 id="install-packages-and-check-kvm-module-configuration">Install packages and check KVM module configuration</h2>
+<p>Install minimal KVM-based virtualization and rawhide release packages:</p>
+<pre><code>  $ yum install libvirt-daemon-kvm                             \
+  libvirt-daemon-config-network libvirt-daemon-config-nwfilter \
+  virt-install libguestfs libguestfs-tools libguestfs-tools-c -y
+
+  $ yum install fedora-release-rawhide -y</code></pre>
+<p>Update Kernel, QEMU, Libvirt, Libguestfs to latest from Rawhide:</p>
+<pre><code>  $ yum update kernel qemu-system-x86 libvirt-daemon-kvm \
+  libguestfs virt-install --enablerepo=rawhide</code></pre>
+<p>Ensure <code>nested</code>, <code>enable_shadow_vmcs</code>, <code>ept</code> KVM kernel module parameters are enabled on L0.</p>
+<pre><code>  $ cat /sys/module/kvm_intel/parameters/nested         \
+    /sys/module/kvm_intel/parameters/enable_shadow_vmcs \
+    /sys/module/kvm_intel/parameters/ept                \
+    /sys/module/kvm_intel/parameters/enable_apicv       \
+  Y
+  Y
+  Y
+  N</code></pre>
+<p>If it doesn't reflect as above, add &quot;options kvm-intel nested=y&quot; (without quotes) to <code>/etc/modprobe.d/dist.conf</code>, &amp; reboot the host.</p>
+<h2 id="create-a-new-libvirt-bridge">Create a new libvirt bridge</h2>
+<p>Create a new libvirt network (other than your default 198.162.x.x) file:</p>
+<pre><code>  $ cat testnet2.xml 
+  &lt;network&gt;
+    &lt;name&gt;testnet2&lt;/name&gt;
+    &lt;uuid&gt;d0e9964a-f91a-40c0-b769-a609aee41bf2&lt;/uuid&gt;
+    &lt;forward mode=&#39;nat&#39;&gt;
+      &lt;nat&gt;
+        &lt;port start=&#39;1024&#39; end=&#39;65535&#39;/&gt;
+      &lt;/nat&gt;
+    &lt;/forward&gt;
+    &lt;bridge name=&#39;virbr1&#39; stp=&#39;on&#39; delay=&#39;0&#39; /&gt;
+    &lt;mac address=&#39;52:54:00:60:f8:6e&#39;/&gt;
+    &lt;ip address=&#39;192.169.142.1&#39; netmask=&#39;255.255.255.0&#39;&gt;
+      &lt;dhcp&gt;
+        &lt;range start=&#39;192.169.142.2&#39; end=&#39;192.169.142.254&#39; /&gt;
+      &lt;/dhcp&gt;
+    &lt;/ip&gt;
+  &lt;/network&gt;</code></pre>
+<p>Define the above network, start it, ensure it is listed in Libvirt active networks (&amp; optionally list the bridge devices):</p>
+<pre><code>$ virsh net-define testnet2.xml
+$ virsh net-start testnet2
+$ virsh net-autostart testnet2
+$ brctl show    </code></pre>
+<h2 id="setup-l1-guest-hypervisor">Setup L1 (guest hypervisor)</h2>
+<p>Use virt-builder to create a VM:</p>
+<pre><code>  $ LIBGUESTFS_BACKEND=direct
+
+  $ virt-builder fedora-20 --format qcow2 --size 100G
+  virt-builder fedora-20 --format qcow2 --size 100G
+  [   1.0] Downloading: http://libguestfs.org/download/builder/fedora-20.xz
+  #######################################################################  100.0%
+  [ 131.0] Planning how to build this image
+  [ 131.0] Uncompressing
+  [ 139.0] Resizing (using virt-resize) to expand the disk to 100.0G
+  [ 220.0] Opening the new disk
+  [ 225.0] Setting a random seed
+  [ 225.0] Setting random root password [did you mean to use --root-password?]
+  Setting random password of root to N4KkQjZTgdfjjqJJ
+  [ 225.0] Finishing off
+  Output: fedora-20.qcow2
+  Output size: 100.0G
+  Output format: qcow2
+  Total usable space: 97.7G
+  Free space: 97.0G (99%)</code></pre>
+<p>Give execute permission to /home/test directory and set the correct SELinux context and boot into it:</p>
+<pre><code>  $ chmod o+x /home/test/
+
+  $ virt-install --name guest-hyp --ram 8192 --vcpus=4 \
+    --disk path=/home/test/vmimages/fedora-20.qcow2,format=qcow2,cache=none --import
+
+  $ virsh console guest-hyp
+  $ init 6 # inside L1</code></pre>
+<p>Edit the L1's libvirt XML:</p>
+<pre><code>  $ virsh edit guest-hyp</code></pre>
+<p>And, add the fragment:</p>
+<pre><code>  &lt;cpu mode=&#39;host-passthrough&#39;/&gt;</code></pre>
+<p>NOTE: Ensure to boot L1 guest w/ libvirt's non-default network bridge (virbr1).</p>
+<h2 id="setup-l2-nested-guest">Setup L2 (nested guest)</h2>
+<p>Install KVM virt packages (refer L1 setup), check KVM module configuration.</p>
+<p>Create L2 guest:</p>
+<pre><code>  $ virt-builder fedora-20 --format qcow2 --size 10G
+  virt-builder: warning: cache /root/.cache/virt-builder: Unix.Unix_error(Unix.ENOENT, &quot;mkdir&quot;, &quot;/root/.cache/virt-builder&quot;)
+  virt-builder: disabling the cache
+  [   1.0] Downloading: http://libguestfs.org/download/builder/fedora-20.xz
+  #######################################################################   99.9%
+  [ 187.0] Planning how to build this image
+  [ 187.0] Uncompressing
+  [ 195.0] Resizing (using virt-resize) to expand the disk to 10.0G
+  [ 267.0] Opening the new disk
+  [ 274.0] Setting a random seed
+  [ 274.0] Setting random root password [did you mean to use --root-password?]
+  Setting random password of root to zuZgCD2WnR6kNw8Y
+  [ 275.0] Finishing off
+  Output: fedora-20.qcow2
+  Output size: 10.0G
+  Output format: qcow2
+  Total usable space: 9.1G
+  Free space: 8.4G (92%)</code></pre>
+<p>Import it to access serial console:</p>
+<pre><code>$ virt-install --name nguest1 --ram 2048 --vcpus=2 \
+--disk
+path=/home/tuser1/vmimages/fedora-20.qcow2,format=qcow2,cache=none
+--import</code></pre>
